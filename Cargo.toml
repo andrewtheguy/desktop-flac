@@ -1,0 +1,27 @@
+[package]
+name = "desktop-flac"
+version = "0.0.1"
+edition = "2024"
+license = "MIT"
+repository = "https://github.com/andrewtheguy/desktop-flac"
+description = "FLAC for a desktop's sound, as wlshare and the remotex gateway both code it: libFLAC loaded at run time, a frame to every block made the moment the block is whole, and the decoder that takes each frame on its own"
+
+# The one place libFLAC is spoken to. Platform-independent and dependency-light on
+# purpose: the wlshare daemon and the remotex gateway both build it, each pinned to
+# a release tag of this repository, and a change to how a desktop's sound is coded
+# is made here once for both.
+[dependencies]
+thiserror = "2"
+# libFLAC is the system's shared library, or the one an application carries,
+# loaded at run time (src/libflac.rs), so nothing of FLAC is compiled or linked.
+libloading = "0.9"
+
+[dev-dependencies]
+# The encoder's frames are read back by symphonia's decoder and the decoder is
+# fed flacenc's frames: pure Rust both, and neither shares anything with libFLAC.
+# Only the FLAC bundle of symphonia, with `symphonia-core` for the decoder trait
+# and the packet it takes; flacenc without its default features, so no worker
+# threads, serde or logging come with it.
+symphonia-bundle-flac = "0.6"
+symphonia-core = "0.6"
+flacenc = { version = "0.5", default-features = false }

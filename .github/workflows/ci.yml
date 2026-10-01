@@ -1,0 +1,47 @@
+name: CI
+
+# Every target a user builds this crate for: Linux x86_64 and aarch64 for the
+# daemon and the gateway, macOS arm64 and Windows x86_64 for the gateway. The
+# tests load the runner's libFLAC, which each installs first.
+on:
+  push:
+    branches: ["**"]
+  pull_request:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: ci-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  test:
+    strategy:
+      fail-fast: false
+      matrix:
+        runner: [ubuntu-24.04, ubuntu-24.04-arm, macos-14, windows-2025]
+    runs-on: ${{ matrix.runner }}
+    steps:
+      - uses: actions/checkout@v5
+      - name: Install libFLAC (Linux)
+        if: runner.os == 'Linux'
+        run: sudo apt-get update && sudo apt-get install -y --no-install-recommends libflac12t64
+      - name: Install libFLAC (macOS)
+        if: runner.os == 'macOS'
+        run: brew install flac
+      - name: Install libFLAC (Windows)
+        if: runner.os == 'Windows'
+        shell: pwsh
+        run: |
+          # FLAC's own release, checked against the digest of the file this was
+          # written against.
+          $zip = Join-Path $env:RUNNER_TEMP 'flac-1.5.0-win.zip'
+          Invoke-WebRequest 'https://github.com/xiph/flac/releases/download/1.5.0/flac-1.5.0-win.zip' -OutFile $zip
+          $digest = (Get-FileHash $zip -Algorithm SHA256).Hash.ToLowerInvariant()
+          if ($digest -ne '53f1500f0d6e7c61379d7fee50d4a9f7f504c650009506d9ba015530d76c0dde') { throw "flac-1.5.0-win.zip is $digest" }
+          Expand-Archive $zip -DestinationPath $env:RUNNER_TEMP
+          Add-Content $env:GITHUB_PATH (Join-Path $env:RUNNER_TEMP 'flac-1.5.0-win\Win64')
+      - run: rustup update stable && rustup default stable && rustup component add clippy
+      - run: cargo clippy --all-targets -- -D warnings
+      - run: cargo test
