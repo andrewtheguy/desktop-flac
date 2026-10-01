@@ -31,6 +31,10 @@ pub type EncoderWrite = unsafe extern "C" fn(
 pub type DecoderRead =
     unsafe extern "C" fn(decoder: *const c_void, buffer: *mut u8, bytes: *mut usize, client: *mut c_void) -> c_int;
 
+/// `FLAC__StreamDecoderTellCallback`: say in `*offset` how many bytes of the
+/// stream have been read.
+pub type DecoderTell = unsafe extern "C" fn(decoder: *const c_void, offset: *mut u64, client: *mut c_void) -> c_int;
+
 /// `FLAC__StreamDecoderWriteCallback`: one decoded frame, a pointer to each
 /// channel's samples in `buffer`.
 pub type DecoderWrite = unsafe extern "C" fn(
@@ -47,6 +51,8 @@ pub type DecoderError = unsafe extern "C" fn(decoder: *const c_void, status: c_i
 pub const READ_CONTINUE: c_int = 0;
 /// `FLAC__STREAM_DECODER_READ_STATUS_END_OF_STREAM`.
 pub const READ_END: c_int = 1;
+/// `FLAC__STREAM_DECODER_TELL_STATUS_OK`.
+pub const TELL_OK: c_int = 0;
 /// `FLAC__STREAM_DECODER_WRITE_STATUS_CONTINUE`, and the encoder's
 /// `FLAC__STREAM_ENCODER_WRITE_STATUS_OK`.
 pub const WRITE_CONTINUE: c_int = 0;
@@ -119,7 +125,7 @@ calls! {
         decoder: *mut c_void,
         read: DecoderRead,
         seek: *const c_void,
-        tell: *const c_void,
+        tell: DecoderTell,
         length: *const c_void,
         eof: *const c_void,
         write: DecoderWrite,
@@ -128,6 +134,7 @@ calls! {
         client: *mut c_void
     ) -> c_int;
     fn decoder_process_until_end_of_stream(decoder: *mut c_void) -> c_int;
+    fn decoder_get_decode_position(decoder: *const c_void, position: *mut u64) -> c_int;
     fn decoder_finish(decoder: *mut c_void) -> c_int;
     fn decoder_get_resolved_state_string(decoder: *const c_void) -> *const c_char;
 }
@@ -142,12 +149,12 @@ const FILES: &[&str] = if cfg!(target_os = "macos") {
     &["libFLAC.so.14", "libFLAC.so.12"]
 };
 
-/// Where the system's library is looked for, in order. The empty prefix is the
+/// Where the system's library is looked for, in order. The empty folder is the
 /// platform loader's own search, which on Windows starts beside the
 /// executable; the others are where Homebrew and MacPorts install FLAC, which
 /// that search does not reach.
 const DIRS: &[&str] =
-    if cfg!(target_os = "macos") { &["", "/opt/homebrew/lib/", "/usr/local/lib/", "/opt/local/lib/"] } else { &[""] };
+    if cfg!(target_os = "macos") { &["", "/opt/homebrew/lib", "/usr/local/lib", "/opt/local/lib"] } else { &[""] };
 
 /// How to get what [`FILES`] names, for the error that says it is missing.
 const INSTALL: &str = if cfg!(target_os = "macos") {
@@ -184,11 +191,7 @@ pub fn load() -> Result<(), Error> {
 /// from nowhere else: an application that brought one does not code with
 /// another it happens to find. Called before any stream is set up.
 pub fn load_from(dir: &Path) -> Result<(), Error> {
-    let mut prefix = dir.to_string_lossy().into_owned();
-    if !prefix.ends_with(std::path::MAIN_SEPARATOR) {
-        prefix.push(std::path::MAIN_SEPARATOR);
-    }
-    match find(&[&prefix]) {
+    match find(&[dir]) {
         // One already loaded would be the one every stream uses, so the named
         // folder's is not dropped in silence for it.
         Ok(api) => API.set(api).map_err(|_| Error::AlreadyLoaded(dir.to_path_buf())),
@@ -198,13 +201,14 @@ pub fn load_from(dir: &Path) -> Result<(), Error> {
 
 /// The first libFLAC in `dirs` that loads and has every call, or why each file
 /// tried was refused.
-fn find(dirs: &[&str]) -> Result<Api, String> {
+fn find<P: AsRef<Path>>(dirs: &[P]) -> Result<Api, String> {
     let mut refused = Vec::new();
     for dir in dirs {
         for file in FILES {
-            let file = format!("{dir}{file}");
+            let path = dir.as_ref().join(file);
+            let file = path.display();
             // SAFETY: libFLAC's initialisers set up nothing but its own tables.
-            match unsafe { libloading::Library::new(&file) }.and_then(resolve) {
+            match unsafe { libloading::Library::new(&path) }.and_then(resolve) {
                 Ok(api) => return Ok(api),
                 // The system's own reason is under libloading's.
                 Err(e) => refused.push(match std::error::Error::source(&e) {

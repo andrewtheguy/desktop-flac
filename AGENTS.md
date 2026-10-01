@@ -14,6 +14,9 @@
 - After changes run `cargo test` and `cargo clippy --all-targets -- -D warnings`.
   The encoder gets an independent decoder in its tests, and the decoder an
   independent encoder.
+- `./scripts/test-libflac.sh` runs both against FLAC 1.5 and 1.4 in turn, each
+  in a Debian container (podman) that has it: run it after a change to what is
+  called in libFLAC.
 - Do not run `cargo fmt`. Errors are `thiserror`: every caller branches on them.
 - A release is the version in `Cargo.toml` bumped and tagged `v<version>` on
   `main`; users pin the tag.

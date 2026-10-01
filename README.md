@@ -22,5 +22,5 @@ on macOS, `libFLAC.dll` on Windows — so nothing of FLAC is needed to build.
 Use it by release tag:
 
 ```toml
-desktop-flac = { git = "https://github.com/andrewtheguy/desktop-flac", tag = "v0.0.1" }
+desktop-flac = { git = "https://github.com/andrewtheguy/desktop-flac", tag = "v0.0.2" }
 ```

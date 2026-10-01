@@ -124,7 +124,7 @@ pub enum Error {
     Shape { frames: u32, channels: u32, bits: u32, rate: u32, want: Stream },
 }
 
-/// One libFLAC encoder or decoder, deleted when it is dropped.
+/// One libFLAC encoder or decoder, never null, deleted when it is dropped.
 struct Handle {
     pointer: *mut c_void,
     delete: unsafe extern "C" fn(*mut c_void),
@@ -181,10 +181,11 @@ impl Encoder {
         // block, and `out` outlives the stream, whose writes are all inside
         // these calls.
         unsafe {
-            let encoder = Handle { pointer: (api.encoder_new)(), delete: api.encoder_delete };
-            if encoder.pointer.is_null() {
+            let pointer = (api.encoder_new)();
+            if pointer.is_null() {
                 return Err(Error::Encode("libFLAC could not allocate an encoder".into()));
             }
+            let encoder = Handle { pointer, delete: api.encoder_delete };
             // A setter refuses only an encoder already started, which a new one
             // is not; what it is given is judged when the stream starts. The
             // streamable subset has every frame state its rate, and a rate no
@@ -278,21 +279,30 @@ impl Decoder {
     pub fn decode(&mut self, frame: &[u8], out: &mut Vec<i32>) -> Result<(), Error> {
         let api = libflac::api()?;
         let before = out.len();
-        let mut reading = Reading { api, want: self.stream, rest: [&self.opening, frame], out, frames: 0, fault: None };
+        let mut reading = Reading {
+            api,
+            want: self.stream,
+            len: self.opening.len() + frame.len(),
+            rest: [&self.opening, frame],
+            out,
+            frames: 0,
+            fault: None,
+        };
         // SAFETY: the calls are made as libFLAC's headers document them, on a
         // decoder that is live until it is dropped. `reading` outlives the
         // stream, whose callbacks are all inside these calls and are the only
         // thing to touch it until then.
         let state = unsafe {
-            let decoder = Handle { pointer: (api.decoder_new)(), delete: api.decoder_delete };
-            if decoder.pointer.is_null() {
+            let pointer = (api.decoder_new)();
+            if pointer.is_null() {
                 return Err(Error::Decode("libFLAC could not allocate a decoder".into()));
             }
+            let decoder = Handle { pointer, delete: api.decoder_delete };
             let status = (api.decoder_init_stream)(
                 decoder.pointer,
                 read_stream,
                 ptr::null(),
-                ptr::null(),
+                tell_stream,
                 ptr::null(),
                 ptr::null(),
                 take_frame,
@@ -325,6 +335,8 @@ impl Decoder {
 struct Reading<'a> {
     api: &'static libflac::Api,
     want: Stream,
+    /// The bytes of the whole stream.
+    len: usize,
     /// The stream not yet read: the opening, then the frame.
     rest: [&'a [u8]; 2],
     out: &'a mut Vec<i32>,
@@ -358,9 +370,23 @@ unsafe extern "C" fn read_stream(
     libflac::READ_CONTINUE
 }
 
-/// A decoded frame: kept if it is the stream's first and of its shape.
+/// Where the decoder's stream has been read to, which libFLAC takes what it
+/// holds unread from to say where a frame ended.
+unsafe extern "C" fn tell_stream(_decoder: *const c_void, offset: *mut u64, client: *mut c_void) -> c_int {
+    // SAFETY: `client` is the `Reading` `Decoder::decode` lent for the stream's
+    // length, and `offset` is libFLAC's to be written.
+    unsafe {
+        let reading = &*client.cast::<Reading>();
+        let unread: usize = reading.rest.iter().map(|part| part.len()).sum();
+        *offset = (reading.len - unread) as u64;
+    }
+    libflac::TELL_OK
+}
+
+/// A decoded frame: kept if it is of the stream's shape and the stream ends
+/// where it does.
 unsafe extern "C" fn take_frame(
-    _decoder: *const c_void,
+    decoder: *const c_void,
     frame: *const libflac::FrameHeader,
     buffer: *const *const i32,
     client: *mut c_void,
@@ -368,8 +394,13 @@ unsafe extern "C" fn take_frame(
     // SAFETY: `client` is the `Reading` `Decoder::decode` lent for the stream's
     // length; `frame` starts with the header read here, and `buffer` holds a
     // pointer for each of its channels to `blocksize` samples, all for the
-    // length of this call.
+    // length of this call. `decoder` is the one calling, which reads the
+    // `Reading` itself to say where it is, so that is asked before it is
+    // borrowed here.
     unsafe {
+        let api = (*client.cast::<Reading>()).api;
+        let mut end = 0;
+        let told = (api.decoder_get_decode_position)(decoder, &mut end) != 0;
         let reading = &mut *client.cast::<Reading>();
         let header = &*frame;
         let want = reading.want;
@@ -387,11 +418,14 @@ unsafe extern "C" fn take_frame(
             });
             return libflac::WRITE_ABORT;
         }
-        reading.frames += 1;
-        if reading.frames > 1 {
+        // What follows a whole frame is refused here: libFLAC takes the start
+        // of another frame the stream ends in for that end, and reports
+        // nothing.
+        if !told || end != reading.len as u64 {
             reading.fault.get_or_insert(Error::Decode("more than one frame".into()));
             return libflac::WRITE_ABORT;
         }
+        reading.frames += 1;
         let channels = std::slice::from_raw_parts(buffer, usize::from(want.channels));
         reading.out.reserve(want.samples());
         for at in 0..usize::from(want.block) {
@@ -594,6 +628,31 @@ mod tests {
         assert!(error.to_string().contains(&dir.display().to_string()), "{error}");
     }
 
+    /// A folder whose name is not UTF-8 is looked in by the name it has: the
+    /// system's library linked into one is found there, and refused only for
+    /// the one already loaded.
+    #[cfg(target_os = "linux")]
+    #[test]
+    fn a_folder_with_a_name_that_is_not_utf8_is_looked_in() {
+        use std::os::unix::ffi::OsStrExt as _;
+
+        load().unwrap();
+        let maps = std::fs::read_to_string("/proc/self/maps").unwrap();
+        let loaded = maps
+            .lines()
+            .filter_map(|line| line.split_whitespace().nth(5))
+            .find(|path| path.contains("libFLAC.so"))
+            .unwrap();
+        let name = ["libFLAC.so.14", "libFLAC.so.12"].into_iter().find(|name| loaded.contains(name)).unwrap();
+        let folder = [format!("desktop-flac-{}-", std::process::id()).as_bytes(), &[0xFF, 0xFE]].concat();
+        let dir = std::env::temp_dir().join(std::ffi::OsStr::from_bytes(&folder));
+        std::fs::create_dir_all(&dir).unwrap();
+        std::os::unix::fs::symlink(loaded, dir.join(name)).unwrap();
+        let error = load_from(&dir).expect_err("libFLAC is already loaded");
+        std::fs::remove_dir_all(&dir).unwrap();
+        assert!(matches!(error, Error::AlreadyLoaded(_)), "{error}");
+    }
+
     /// A frame's header says what was agreed, each field read where the FLAC
     /// specification puts it: fixed blocking, the stream's block, rate,
     /// channels and sample width, and the number zero, every frame being a
@@ -662,6 +721,12 @@ mod tests {
         assert!(matches!(refused(&good[0][..good[0].len() / 2], "half a frame"), Error::Decode(_)));
         assert!(matches!(refused(&[&good[0][..], &good[1][..]].concat(), "two frames"), Error::Decode(_)));
         assert!(matches!(refused(&[&good[0][..], &[0; 9][..]].concat(), "a frame and more"), Error::Decode(_)));
+        // The start of another frame, which libFLAC takes for the stream's end.
+        assert!(matches!(refused(&[&good[0][..], &[0xFF][..]].concat(), "a frame and a byte"), Error::Decode(_)));
+        for cut in 1..good[1].len() {
+            let frame = [&good[0][..], &good[1][..cut]].concat();
+            assert!(matches!(refused(&frame, "a frame and part of another"), Error::Decode(_)), "{cut} bytes");
+        }
 
         // One bit of the samples flipped, and one of the header: each has a CRC.
         let mut damaged = good[0].clone();
