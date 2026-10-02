@@ -12,15 +12,15 @@ and the [remotex](https://github.com/andrewtheguy/remotex) gateway both code it.
 - `Decoder`: one frame in, its block out, each frame on its own, behind the
   stream header it builds from the `Stream`; a frame of any other shape, or
   that is not one whole frame, is an error.
-- `load_from`: the folder an application carries its own libFLAC in, for one
-  that does.
 
-libFLAC is not linked: the shared library is loaded at run time, FLAC 1.5's or
-1.4's — `libFLAC.so.14` or `.so.12` on Linux, `libFLAC.14.dylib` or `.12.dylib`
-on macOS, `libFLAC.dll` on Windows — so nothing of FLAC is needed to build.
+libFLAC is linked statically, FLAC 1.5 from the prebuilt archive
+[libflac-prebuilt](https://github.com/andrewtheguy/libflac-prebuilt) publishes
+for Linux x86_64 and aarch64, macOS arm64 and Windows x86_64: the build
+downloads it and compiles no C, and nothing of FLAC is installed or loaded
+where the binary runs.
 
 Use it by release tag:
 
 ```toml
-desktop-flac = { git = "https://github.com/andrewtheguy/desktop-flac", tag = "v0.0.2" }
+desktop-flac = { git = "https://github.com/andrewtheguy/desktop-flac", tag = "v0.0.3" }
 ```

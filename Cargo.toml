@@ -1,10 +1,10 @@
 [package]
 name = "desktop-flac"
-version = "0.0.2"
+version = "0.0.3"
 edition = "2024"
 license = "MIT"
 repository = "https://github.com/andrewtheguy/desktop-flac"
-description = "FLAC for a desktop's sound, as wlshare and the remotex gateway both code it: libFLAC loaded at run time, a frame to every block made the moment the block is whole, and the decoder that takes each frame on its own"
+description = "FLAC for a desktop's sound, as wlshare and the remotex gateway both code it: libFLAC linked statically, a frame to every block made the moment the block is whole, and the decoder that takes each frame on its own"
 
 # The one place libFLAC is spoken to. Platform-independent and dependency-light on
 # purpose: the wlshare daemon and the remotex gateway both build it, each pinned to
@@ -12,9 +12,10 @@ description = "FLAC for a desktop's sound, as wlshare and the remotex gateway bo
 # is made here once for both.
 [dependencies]
 thiserror = "2"
-# libFLAC is the system's shared library, or the one an application carries,
-# loaded at run time (src/libflac.rs), so nothing of FLAC is compiled or linked.
-libloading = "0.9"
+# libFLAC, linked from a prebuilt static archive this sys crate downloads, so no
+# C is compiled and nothing is looked for at run time. The tag pins the crate;
+# the archives are the latest release's.
+flac-sys = { package = "libflac-prebuilt-sys", git = "https://github.com/andrewtheguy/libflac-prebuilt", tag = "v1.5.0-20261002034056-4ba69e8" }
 
 [dev-dependencies]
 # The encoder's frames are read back by symphonia's decoder and the decoder is

@@ -74,10 +74,10 @@ dependencies = [
 
 [[package]]
 name = "desktop-flac"
-version = "0.0.2"
+version = "0.0.3"
 dependencies = [
  "flacenc",
- "libloading",
+ "libflac-prebuilt-sys",
  "symphonia-bundle-flac",
  "symphonia-core",
  "thiserror",
@@ -144,14 +144,9 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "20870f649af7073d53e38067b2a84312175d56ea15217e1b15bc83506ec50afb"
 
 [[package]]
-name = "libloading"
-version = "0.9.0"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "754ca22de805bb5744484a5b151a9e1a8e837d5dc232c2d7d8c2e3492edc8b60"
-dependencies = [
- "cfg-if",
- "windows-link",
-]
+name = "libflac-prebuilt-sys"
+version = "0.1.0"
+source = "git+https://github.com/andrewtheguy/libflac-prebuilt?tag=v1.5.0-20261002034056-4ba69e8#4ba69e821e60fca68657abdb3968c21dab01e747"
 
 [[package]]
 name = "log"
@@ -333,9 +328,3 @@ name = "version_check"
 version = "0.9.5"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "0b928f33d975fc6ad9f86c8f283853ad26bdd5b10b7f1542aa2fa15e2289105a"
-
-[[package]]
-name = "windows-link"
-version = "0.2.1"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "f0805222e57f7521d6a62e36fa9163bc891acd422f971defe97d64e70d0a4fe5"

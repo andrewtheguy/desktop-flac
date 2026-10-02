@@ -12,10 +12,9 @@
 //! - **[`Decoder`]** takes one frame and gives the block back, each frame on its
 //!   own: a frame lost on the way costs its own samples and nothing after.
 //!
-//! libFLAC is not linked. The system's shared library is loaded the first time
-//! a stream is set up, or the one an application carries when it says where
-//! ([`load_from`]), so the crate builds where there is no FLAC and a user ships
-//! none of it it does not choose to.
+//! libFLAC is linked statically, from the prebuilt archive `libflac-prebuilt`'s
+//! sys crate downloads: no C is compiled, none of FLAC is looked for at run
+//! time, and a user ships no library beside its binary.
 //!
 //! ## A frame is a stream of its own
 //!
@@ -36,13 +35,9 @@
 //! stream's shape is agreed and what a sample's bytes are on either side belong
 //! to the user.
 
-mod libflac;
-
-use std::ffi::{c_int, c_void};
-use std::path::PathBuf;
+use std::ffi::{CStr, c_char, c_void};
 use std::ptr;
 
-pub use libflac::{load, load_from};
 use thiserror::Error;
 
 /// The bytes of a `STREAMINFO` block.
@@ -97,12 +92,6 @@ impl Stream {
 /// Why a frame could not be made or read.
 #[derive(Debug, Error)]
 pub enum Error {
-    /// libFLAC is not where it was looked for: how to get it, and why each file
-    /// tried was refused.
-    #[error("libFLAC is not installed: {install} ({tried})")]
-    Missing { install: String, tried: String },
-    #[error("libFLAC was already loaded when {0} was named as the folder to load it from")]
-    AlreadyLoaded(PathBuf),
     #[error("{0:?} is not a stream FLAC carries")]
     Unsupported(Stream),
     /// libFLAC would not start the stream, carried as its name for why.
@@ -125,12 +114,12 @@ pub enum Error {
 }
 
 /// One libFLAC encoder or decoder, never null, deleted when it is dropped.
-struct Handle {
-    pointer: *mut c_void,
-    delete: unsafe extern "C" fn(*mut c_void),
+struct Handle<T> {
+    pointer: *mut T,
+    delete: unsafe extern "C" fn(*mut T),
 }
 
-impl Drop for Handle {
+impl<T> Drop for Handle<T> {
     fn drop(&mut self) {
         // SAFETY: the pointer is this value's alone, and is not used again.
         unsafe { (self.delete)(self.pointer) };
@@ -143,8 +132,8 @@ pub struct Encoder {
 }
 
 impl Encoder {
-    /// An encoder for `stream`, if FLAC carries it and libFLAC is here to
-    /// encode it: a stream is started and finished with nothing in it.
+    /// An encoder for `stream`, if FLAC carries it and libFLAC takes it: a
+    /// stream is started and finished with nothing in it.
     pub fn new(stream: Stream) -> Result<Self, Error> {
         stream.check()?;
         let encoder = Self { stream };
@@ -174,49 +163,52 @@ impl Encoder {
     /// One libFLAC stream from start to finish, holding `block`: a whole one,
     /// or nothing.
     fn run(&self, block: &[i32], out: &mut Vec<u8>) -> Result<(), Error> {
-        let api = libflac::api()?;
         let stream = &self.stream;
         // SAFETY: the calls are made as libFLAC's headers document them, on an
         // encoder that is live until it is dropped. `block` is empty or a whole
         // block, and `out` outlives the stream, whose writes are all inside
         // these calls.
         unsafe {
-            let pointer = (api.encoder_new)();
+            let pointer = flac_sys::FLAC__stream_encoder_new();
             if pointer.is_null() {
                 return Err(Error::Encode("libFLAC could not allocate an encoder".into()));
             }
-            let encoder = Handle { pointer, delete: api.encoder_delete };
+            let encoder = Handle { pointer, delete: flac_sys::FLAC__stream_encoder_delete };
             // A setter refuses only an encoder already started, which a new one
             // is not; what it is given is judged when the stream starts. The
             // streamable subset has every frame state its rate, and a rate no
             // frame header can state is left to the stream header the decoder
             // builds, so it is off. So is the MD5 of the samples, which only a
             // stream header that is sent would carry.
-            (api.encoder_set_streamable_subset)(encoder.pointer, 0);
-            (api.encoder_set_do_md5)(encoder.pointer, 0);
-            (api.encoder_set_channels)(encoder.pointer, u32::from(stream.channels));
-            (api.encoder_set_bits_per_sample)(encoder.pointer, u32::from(stream.bits));
-            (api.encoder_set_sample_rate)(encoder.pointer, stream.rate);
-            (api.encoder_set_blocksize)(encoder.pointer, u32::from(stream.block));
-            let status = (api.encoder_init_stream)(
+            flac_sys::FLAC__stream_encoder_set_streamable_subset(encoder.pointer, 0);
+            flac_sys::FLAC__stream_encoder_set_do_md5(encoder.pointer, 0);
+            flac_sys::FLAC__stream_encoder_set_channels(encoder.pointer, u32::from(stream.channels));
+            flac_sys::FLAC__stream_encoder_set_bits_per_sample(encoder.pointer, u32::from(stream.bits));
+            flac_sys::FLAC__stream_encoder_set_sample_rate(encoder.pointer, stream.rate);
+            flac_sys::FLAC__stream_encoder_set_blocksize(encoder.pointer, u32::from(stream.block));
+            let status = flac_sys::FLAC__stream_encoder_init_stream(
                 encoder.pointer,
-                keep_frame,
-                ptr::null(),
-                ptr::null(),
-                ptr::null(),
+                Some(keep_frame),
+                None,
+                None,
+                None,
                 ptr::from_mut(out).cast(),
             );
-            if status != 0 {
-                return Err(Error::Refused(api.encoder_init_status(status)));
+            if status != flac_sys::FLAC__StreamEncoderInitStatus_FLAC__STREAM_ENCODER_INIT_STATUS_OK {
+                return Err(Error::Refused(encoder_init_status(status)));
             }
-            let state = || libflac::state((api.encoder_get_resolved_state_string)(encoder.pointer));
+            let state = || state(flac_sys::FLAC__stream_encoder_get_resolved_state_string(encoder.pointer));
             if !block.is_empty()
-                && (api.encoder_process_interleaved)(encoder.pointer, block.as_ptr(), u32::from(stream.block)) == 0
+                && flac_sys::FLAC__stream_encoder_process_interleaved(
+                    encoder.pointer,
+                    block.as_ptr(),
+                    u32::from(stream.block),
+                ) == 0
             {
                 return Err(Error::Encode(state()));
             }
             // A failed finish leaves the encoder in the state that failed it.
-            if (api.encoder_finish)(encoder.pointer) == 0 {
+            if flac_sys::FLAC__stream_encoder_finish(encoder.pointer) == 0 {
                 return Err(Error::Encode(state()));
             }
         }
@@ -228,20 +220,20 @@ impl Encoder {
 /// `Vec<u8>` that `client` is, and the marker and metadata a stream opens with
 /// are not.
 unsafe extern "C" fn keep_frame(
-    _encoder: *const c_void,
+    _encoder: *const flac_sys::FLAC__StreamEncoder,
     buffer: *const u8,
     bytes: usize,
     samples: u32,
     _frame: u32,
     client: *mut c_void,
-) -> c_int {
+) -> flac_sys::FLAC__StreamEncoderWriteStatus {
     if samples > 0 {
         // SAFETY: `client` is the vector `Encoder::run` lent for the stream's
         // length, which nothing else touches until it has finished, and
         // `buffer` holds `bytes` bytes for the length of this call.
         unsafe { (*client.cast::<Vec<u8>>()).extend_from_slice(std::slice::from_raw_parts(buffer, bytes)) };
     }
-    libflac::WRITE_CONTINUE
+    flac_sys::FLAC__StreamEncoderWriteStatus_FLAC__STREAM_ENCODER_WRITE_STATUS_OK
 }
 
 /// The stream marker and the header of a `STREAMINFO` block that is the last
@@ -257,13 +249,11 @@ pub struct Decoder {
 }
 
 impl Decoder {
-    /// A decoder for `stream`, if FLAC carries it and libFLAC is here to decode
-    /// it.
+    /// A decoder for `stream`, if FLAC carries it.
     pub fn new(stream: Stream) -> Result<Self, Error> {
         let mut opening = [0; STREAM_OPENING.len() + STREAMINFO_LEN];
         opening[..STREAM_OPENING.len()].copy_from_slice(&STREAM_OPENING);
         opening[STREAM_OPENING.len()..].copy_from_slice(&stream.streaminfo()?);
-        libflac::api()?;
         Ok(Self { stream, opening })
     }
 
@@ -277,10 +267,8 @@ impl Decoder {
     /// bit what was encoded. `frame` is that frame and nothing else, of the
     /// stream's own shape; libFLAC checks both of its CRCs.
     pub fn decode(&mut self, frame: &[u8], out: &mut Vec<i32>) -> Result<(), Error> {
-        let api = libflac::api()?;
         let before = out.len();
         let mut reading = Reading {
-            api,
             want: self.stream,
             len: self.opening.len() + frame.len(),
             rest: [&self.opening, frame],
@@ -293,30 +281,30 @@ impl Decoder {
         // stream, whose callbacks are all inside these calls and are the only
         // thing to touch it until then.
         let state = unsafe {
-            let pointer = (api.decoder_new)();
+            let pointer = flac_sys::FLAC__stream_decoder_new();
             if pointer.is_null() {
                 return Err(Error::Decode("libFLAC could not allocate a decoder".into()));
             }
-            let decoder = Handle { pointer, delete: api.decoder_delete };
-            let status = (api.decoder_init_stream)(
+            let decoder = Handle { pointer, delete: flac_sys::FLAC__stream_decoder_delete };
+            let status = flac_sys::FLAC__stream_decoder_init_stream(
                 decoder.pointer,
-                read_stream,
-                ptr::null(),
-                tell_stream,
-                ptr::null(),
-                ptr::null(),
-                take_frame,
-                ptr::null(),
-                note_error,
+                Some(read_stream),
+                None,
+                Some(tell_stream),
+                None,
+                None,
+                Some(take_frame),
+                None,
+                Some(note_error),
                 ptr::from_mut(&mut reading).cast(),
             );
-            if status != 0 {
-                return Err(Error::Refused(api.decoder_init_status(status)));
+            if status != flac_sys::FLAC__StreamDecoderInitStatus_FLAC__STREAM_DECODER_INIT_STATUS_OK {
+                return Err(Error::Refused(decoder_init_status(status)));
             }
             // What it returns is in the state, and in what the callbacks noted.
-            (api.decoder_process_until_end_of_stream)(decoder.pointer);
-            let state = libflac::state((api.decoder_get_resolved_state_string)(decoder.pointer));
-            (api.decoder_finish)(decoder.pointer);
+            flac_sys::FLAC__stream_decoder_process_until_end_of_stream(decoder.pointer);
+            let state = state(flac_sys::FLAC__stream_decoder_get_resolved_state_string(decoder.pointer));
+            flac_sys::FLAC__stream_decoder_finish(decoder.pointer);
             state
         };
         let Reading { out, frames, fault, .. } = reading;
@@ -333,7 +321,6 @@ impl Decoder {
 
 /// One frame being read: what the decoder's callbacks share.
 struct Reading<'a> {
-    api: &'static libflac::Api,
     want: Stream,
     /// The bytes of the whole stream.
     len: usize,
@@ -349,30 +336,34 @@ struct Reading<'a> {
 /// The decoder's stream as libFLAC reads it: the opening, the frame, and then
 /// its end.
 unsafe extern "C" fn read_stream(
-    _decoder: *const c_void,
+    _decoder: *const flac_sys::FLAC__StreamDecoder,
     buffer: *mut u8,
     bytes: *mut usize,
     client: *mut c_void,
-) -> c_int {
+) -> flac_sys::FLAC__StreamDecoderReadStatus {
     // SAFETY: `client` is the `Reading` `Decoder::decode` lent for the stream's
     // length, and `buffer` has room for the `*bytes` libFLAC asks for.
     unsafe {
         let reading = &mut *client.cast::<Reading>();
         let Some(part) = reading.rest.iter_mut().find(|part| !part.is_empty()) else {
             *bytes = 0;
-            return libflac::READ_END;
+            return flac_sys::FLAC__StreamDecoderReadStatus_FLAC__STREAM_DECODER_READ_STATUS_END_OF_STREAM;
         };
         let taken = part.len().min(*bytes);
         ptr::copy_nonoverlapping(part.as_ptr(), buffer, taken);
         *part = &part[taken..];
         *bytes = taken;
     }
-    libflac::READ_CONTINUE
+    flac_sys::FLAC__StreamDecoderReadStatus_FLAC__STREAM_DECODER_READ_STATUS_CONTINUE
 }
 
 /// Where the decoder's stream has been read to, which libFLAC takes what it
 /// holds unread from to say where a frame ended.
-unsafe extern "C" fn tell_stream(_decoder: *const c_void, offset: *mut u64, client: *mut c_void) -> c_int {
+unsafe extern "C" fn tell_stream(
+    _decoder: *const flac_sys::FLAC__StreamDecoder,
+    offset: *mut u64,
+    client: *mut c_void,
+) -> flac_sys::FLAC__StreamDecoderTellStatus {
     // SAFETY: `client` is the `Reading` `Decoder::decode` lent for the stream's
     // length, and `offset` is libFLAC's to be written.
     unsafe {
@@ -380,29 +371,28 @@ unsafe extern "C" fn tell_stream(_decoder: *const c_void, offset: *mut u64, clie
         let unread: usize = reading.rest.iter().map(|part| part.len()).sum();
         *offset = (reading.len - unread) as u64;
     }
-    libflac::TELL_OK
+    flac_sys::FLAC__StreamDecoderTellStatus_FLAC__STREAM_DECODER_TELL_STATUS_OK
 }
 
 /// A decoded frame: kept if it is of the stream's shape and the stream ends
 /// where it does.
 unsafe extern "C" fn take_frame(
-    decoder: *const c_void,
-    frame: *const libflac::FrameHeader,
+    decoder: *const flac_sys::FLAC__StreamDecoder,
+    frame: *const flac_sys::FLAC__Frame,
     buffer: *const *const i32,
     client: *mut c_void,
-) -> c_int {
+) -> flac_sys::FLAC__StreamDecoderWriteStatus {
     // SAFETY: `client` is the `Reading` `Decoder::decode` lent for the stream's
-    // length; `frame` starts with the header read here, and `buffer` holds a
+    // length; `frame` is libFLAC's, whose header is read here, and `buffer` holds a
     // pointer for each of its channels to `blocksize` samples, all for the
     // length of this call. `decoder` is the one calling, which reads the
     // `Reading` itself to say where it is, so that is asked before it is
     // borrowed here.
     unsafe {
-        let api = (*client.cast::<Reading>()).api;
         let mut end = 0;
-        let told = (api.decoder_get_decode_position)(decoder, &mut end) != 0;
+        let told = flac_sys::FLAC__stream_decoder_get_decode_position(decoder, &mut end) != 0;
         let reading = &mut *client.cast::<Reading>();
-        let header = &*frame;
+        let header = &(*frame).header;
         let want = reading.want;
         let agreed = header.blocksize == u32::from(want.block)
             && header.channels == u32::from(want.channels)
@@ -416,14 +406,14 @@ unsafe extern "C" fn take_frame(
                 rate: header.sample_rate,
                 want,
             });
-            return libflac::WRITE_ABORT;
+            return flac_sys::FLAC__StreamDecoderWriteStatus_FLAC__STREAM_DECODER_WRITE_STATUS_ABORT;
         }
         // What follows a whole frame is refused here: libFLAC takes the start
         // of another frame the stream ends in for that end, and reports
         // nothing.
         if !told || end != reading.len as u64 {
             reading.fault.get_or_insert(Error::Decode("more than one frame".into()));
-            return libflac::WRITE_ABORT;
+            return flac_sys::FLAC__StreamDecoderWriteStatus_FLAC__STREAM_DECODER_WRITE_STATUS_ABORT;
         }
         reading.frames += 1;
         let channels = std::slice::from_raw_parts(buffer, usize::from(want.channels));
@@ -432,16 +422,63 @@ unsafe extern "C" fn take_frame(
             reading.out.extend(channels.iter().map(|channel| *channel.add(at)));
         }
     }
-    libflac::WRITE_CONTINUE
+    flac_sys::FLAC__StreamDecoderWriteStatus_FLAC__STREAM_DECODER_WRITE_STATUS_CONTINUE
 }
 
 /// What libFLAC found that is not FLAC: the first is what the frame is refused
 /// for.
-unsafe extern "C" fn note_error(_decoder: *const c_void, status: c_int, client: *mut c_void) {
+unsafe extern "C" fn note_error(
+    _decoder: *const flac_sys::FLAC__StreamDecoder,
+    status: flac_sys::FLAC__StreamDecoderErrorStatus,
+    client: *mut c_void,
+) {
     // SAFETY: `client` is the `Reading` `Decoder::decode` lent for the stream's
     // length.
     let reading = unsafe { &mut *client.cast::<Reading>() };
-    reading.fault.get_or_insert_with(|| Error::Decode(reading.api.decoder_error_status(status)));
+    reading.fault.get_or_insert_with(|| Error::Decode(decoder_error_status(status)));
+}
+
+/// The name libFLAC's array `names` has for `status`, one of its `known`.
+///
+/// # Safety
+///
+/// `names` is one of libFLAC's arrays of a static name for each status from
+/// zero, `known` long.
+unsafe fn status_name(names: *const *const c_char, known: usize, status: i64) -> String {
+    match usize::try_from(status) {
+        // SAFETY: inside the array, whose names are static NUL-terminated
+        // strings.
+        Ok(at) if at < known => unsafe { CStr::from_ptr(*names.add(at)) }.to_string_lossy().into_owned(),
+        _ => format!("status {status}"),
+    }
+}
+
+/// What libFLAC calls the status an encoder's init returned.
+fn encoder_init_status(status: flac_sys::FLAC__StreamEncoderInitStatus) -> String {
+    // SAFETY: the array has a name for each of FLAC 1.5's fourteen statuses.
+    unsafe { status_name(ptr::addr_of!(flac_sys::FLAC__StreamEncoderInitStatusString).cast(), 14, i64::from(status)) }
+}
+
+/// What libFLAC calls the status a decoder's init returned.
+fn decoder_init_status(status: flac_sys::FLAC__StreamDecoderInitStatus) -> String {
+    // SAFETY: the array has a name for each of FLAC 1.5's six statuses.
+    unsafe { status_name(ptr::addr_of!(flac_sys::FLAC__StreamDecoderInitStatusString).cast(), 6, i64::from(status)) }
+}
+
+/// What libFLAC calls the status its decoder reported an error with.
+fn decoder_error_status(status: flac_sys::FLAC__StreamDecoderErrorStatus) -> String {
+    // SAFETY: the array has a name for each of FLAC 1.5's seven statuses.
+    unsafe { status_name(ptr::addr_of!(flac_sys::FLAC__StreamDecoderErrorStatusString).cast(), 7, i64::from(status)) }
+}
+
+/// libFLAC's own static string for a state, as text.
+///
+/// # Safety
+///
+/// `state` is what one of libFLAC's `get_resolved_state_string` calls returned.
+unsafe fn state(state: *const c_char) -> String {
+    // SAFETY: a static NUL-terminated string of libFLAC's.
+    unsafe { CStr::from_ptr(state) }.to_string_lossy().into_owned()
 }
 
 #[cfg(test)]
@@ -616,41 +653,25 @@ mod tests {
         }
     }
 
-    /// A folder named as the one to load libFLAC from is the only place looked
-    /// in: one that holds none is an error naming it, whatever the system has.
+    /// The libFLAC linked is the archive's, the release the status arrays
+    /// were counted in, and not one the system has.
     #[test]
-    fn a_named_folder_without_libflac_is_refused() {
-        let dir = std::env::temp_dir().join(format!("desktop-flac-empty-{}", std::process::id()));
-        std::fs::create_dir_all(&dir).unwrap();
-        let error = load_from(&dir).expect_err("an empty folder");
-        std::fs::remove_dir(&dir).unwrap();
-        assert!(matches!(error, Error::Missing { .. }), "{error}");
-        assert!(error.to_string().contains(&dir.display().to_string()), "{error}");
+    fn the_linked_libflac_is_the_prebuilt_one() {
+        assert_eq!(flac_sys::version(), flac_sys::PREBUILT_VERSION);
+        assert!(flac_sys::version().starts_with("1.5."), "{}", flac_sys::version());
     }
 
-    /// A folder whose name is not UTF-8 is looked in by the name it has: the
-    /// system's library linked into one is found there, and refused only for
-    /// the one already loaded.
-    #[cfg(target_os = "linux")]
+    /// A status is named as libFLAC names it, the last of each array too, and
+    /// one past an array's end is a number rather than a read beyond it.
     #[test]
-    fn a_folder_with_a_name_that_is_not_utf8_is_looked_in() {
-        use std::os::unix::ffi::OsStrExt as _;
-
-        load().unwrap();
-        let maps = std::fs::read_to_string("/proc/self/maps").unwrap();
-        let loaded = maps
-            .lines()
-            .filter_map(|line| line.split_whitespace().nth(5))
-            .find(|path| path.contains("libFLAC.so"))
-            .unwrap();
-        let name = ["libFLAC.so.14", "libFLAC.so.12"].into_iter().find(|name| loaded.contains(name)).unwrap();
-        let folder = [format!("desktop-flac-{}-", std::process::id()).as_bytes(), &[0xFF, 0xFE]].concat();
-        let dir = std::env::temp_dir().join(std::ffi::OsStr::from_bytes(&folder));
-        std::fs::create_dir_all(&dir).unwrap();
-        std::os::unix::fs::symlink(loaded, dir.join(name)).unwrap();
-        let error = load_from(&dir).expect_err("libFLAC is already loaded");
-        std::fs::remove_dir_all(&dir).unwrap();
-        assert!(matches!(error, Error::AlreadyLoaded(_)), "{error}");
+    fn a_status_has_the_name_libflac_gives_it() {
+        assert_eq!(encoder_init_status(0), "FLAC__STREAM_ENCODER_INIT_STATUS_OK");
+        assert_eq!(encoder_init_status(13), "FLAC__STREAM_ENCODER_INIT_STATUS_ALREADY_INITIALIZED");
+        assert_eq!(encoder_init_status(14), "status 14");
+        assert_eq!(decoder_init_status(5), "FLAC__STREAM_DECODER_INIT_STATUS_ALREADY_INITIALIZED");
+        assert_eq!(decoder_init_status(6), "status 6");
+        assert_eq!(decoder_error_status(6), "FLAC__STREAM_DECODER_ERROR_STATUS_MISSING_FRAME");
+        assert_eq!(decoder_error_status(7), "status 7");
     }
 
     /// A frame's header says what was agreed, each field read where the FLAC
