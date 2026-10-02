@@ -1,9 +1,9 @@
 [package]
-name = "desktop-flac"
-version = "0.0.3"
+name = "sound-flac"
+version = "0.0.4"
 edition = "2024"
 license = "MIT"
-repository = "https://github.com/andrewtheguy/desktop-flac"
+repository = "https://github.com/andrewtheguy/sound-flac"
 description = "FLAC for a desktop's sound, as wlshare and the remotex gateway both code it: libFLAC linked statically, a frame to every block made the moment the block is whole, and the decoder that takes each frame on its own"
 
 # The one place libFLAC is spoken to. Platform-independent and dependency-light on
