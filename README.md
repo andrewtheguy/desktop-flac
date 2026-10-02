@@ -1,4 +1,4 @@
-# desktop-flac
+# sound-flac
 
 FLAC for a desktop's sound, as [wlshare](https://github.com/andrewtheguy/wlshare)
 and the [remotex](https://github.com/andrewtheguy/remotex) gateway both code it.
@@ -22,5 +22,5 @@ where the binary runs.
 Use it by release tag:
 
 ```toml
-desktop-flac = { git = "https://github.com/andrewtheguy/desktop-flac", tag = "v0.0.3" }
+sound-flac = { git = "https://github.com/andrewtheguy/sound-flac", tag = "v0.0.4" }
 ```

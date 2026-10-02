@@ -1,7 +1,7 @@
 # Repository instructions
 
 - Strict no backward-compatibility or legacy paths no matter what.
-- One crate, `desktop-flac`: the one place libFLAC is spoken to for the wlshare
+- One crate, `sound-flac`: the one place libFLAC is spoken to for the wlshare
   daemon and the remotex gateway, which each pin it by a release tag of this
   repository. How a block becomes a frame, how a frame is read back and which
   libFLAC is linked change here and reach them as a pin bump.
